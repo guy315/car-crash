@@ -1,5 +1,3 @@
-
-```html
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -473,15 +471,16 @@ let score = 0;
 let distance = 0;
 let shakeIntensity = 0;
 let roadDashOffset = 0;
+let frameCount = 0;
 
-// Player Car with lowered acceleration for smooth steering
+// Player Car
 const player = {
     x: 220,
     y: 520,
     width: 36,
     height: 65,
     vx: 0,
-    accel: 0.35,  // Smoother, less twitchy steering
+    accel: 0.35,
     friction: 0.78,
     color: '#00f0ff',
     angle: 0
@@ -607,8 +606,6 @@ function triggerCrash() {
 
 function addSparks(x, y, count = 8) {
     for (let i = 0; i < count; i++) {
-        const angle = (Math.random() - 0.5) * Math.PI;
-        const spd = Math.random() * 6 + 2;
         particles.push({
             x: x,
             y: y,
@@ -646,7 +643,8 @@ function addSkidMark() {
 
 function spawnTraffic() {
     const minDistance = 160;
-    const lane = LANES[Math.floor(Math.random() * LANES.length)];
+    const currentLaneIndex = Math.floor(Math.random() * LANES.length);
+    const lane = LANES[currentLaneIndex];
     
     const isOccupied = traffic.some(t => Math.abs(t.x - lane) < 20 && t.y < minDistance);
     
@@ -655,10 +653,15 @@ function spawnTraffic() {
         traffic.push({
             x: lane,
             y: -100,
+            targetX: lane,
+            currentLaneIndex: currentLaneIndex,
             width: type.width,
             height: type.height,
             speed: BASE_SPEED + type.speedOffset + (Math.random() * 1.5),
-            color: type.color
+            color: type.color,
+            blinkerDir: null, // 'left', 'right', or null
+            blinkerTimer: 0,
+            isChangingLane: false
         });
     }
 }
@@ -667,6 +670,7 @@ function spawnTraffic() {
  * Update Loop
  */
 function update() {
+    frameCount++;
     if (shakeIntensity > 0) shakeIntensity *= 0.9;
 
     if (gameState !== STATE_PLAYING) {
@@ -690,7 +694,7 @@ function update() {
 
     roadDashOffset = (roadDashOffset + gameSpeed) % 40;
 
-    // Smoother Steering physics
+    // Steering Physics
     if (keys.Left) player.vx -= player.accel;
     if (keys.Right) player.vx += player.accel;
 
@@ -700,7 +704,7 @@ function update() {
 
     if (Math.abs(player.vx) > 2) addSkidMark();
 
-    // Road Border Collision (Instant crash on outer walls)
+    // Road Border Collision
     if (player.x - player.width / 2 < ROAD_LEFT || player.x + player.width / 2 > ROAD_RIGHT) {
         triggerCrash();
     }
@@ -711,15 +715,61 @@ function update() {
         spawnTraffic();
     }
 
-    // NPC Intelligence: Stop cars from running through each other
+    // NPC AI Logic: Slow down for cars ahead & Trigger Lane Changes
     for (let i = 0; i < traffic.length; i++) {
         let t1 = traffic[i];
+
+        // 1. NPC Avoidance Logic
         for (let j = 0; j < traffic.length; j++) {
             if (i === j) continue;
             let t2 = traffic[j];
-            // If in same lane and t2 is directly ahead of t1
-            if (Math.abs(t1.x - t2.x) < 20 && t2.y > t1.y && (t2.y - t1.y) < 110) {
+            if (Math.abs(t1.x - t2.x) < 25 && t2.y > t1.y && (t2.y - t1.y) < 110) {
                 t1.speed = Math.min(t1.speed, t2.speed - 0.2);
+            }
+        }
+
+        // 2. Decide Lane Change with Blinker
+        if (!t1.isChangingLane && !t1.blinkerDir && Math.random() < 0.003 && t1.y > 50 && t1.y < canvas.height - 150) {
+            let possibleLanes = [];
+            if (t1.currentLaneIndex > 0) possibleLanes.push(t1.currentLaneIndex - 1);
+            if (t1.currentLaneIndex < LANES.length - 1) possibleLanes.push(t1.currentLaneIndex + 1);
+
+            if (possibleLanes.length > 0) {
+                let targetIdx = possibleLanes[Math.floor(Math.random() * possibleLanes.length)];
+                let targetX = LANES[targetIdx];
+
+                // Check if target lane space is clear
+                let isTargetClear = !traffic.some(other => 
+                    other !== t1 && Math.abs(other.x - targetX) < 30 && Math.abs(other.y - t1.y) < 120
+                );
+
+                if (isTargetClear) {
+                    t1.targetLaneIndex = targetIdx;
+                    t1.blinkerDir = (targetIdx < t1.currentLaneIndex) ? 'left' : 'right';
+                    t1.blinkerTimer = 60; // 1 second flash warning before turning
+                }
+            }
+        }
+
+        // Process Blinker countdown & Lane movement execution
+        if (t1.blinkerTimer > 0) {
+            t1.blinkerTimer--;
+            if (t1.blinkerTimer === 0) {
+                t1.isChangingLane = true;
+                t1.targetX = LANES[t1.targetLaneIndex];
+            }
+        }
+
+        // Move towards target lane smoothly
+        if (t1.isChangingLane) {
+            let dx = t1.targetX - t1.x;
+            if (Math.abs(dx) > 1.5) {
+                t1.x += Math.sign(dx) * 1.5;
+            } else {
+                t1.x = t1.targetX;
+                t1.currentLaneIndex = t1.targetLaneIndex;
+                t1.isChangingLane = false;
+                t1.blinkerDir = null;
             }
         }
     }
@@ -741,13 +791,11 @@ function update() {
         const tBottom = t.y + t.height / 2;
 
         if (pRight > tLeft && pLeft < tRight && pBottom > tTop && pTop < tBottom) {
-            // Determine side overlap vs vertical overlap
             const overlapX = Math.min(pRight - tLeft, tRight - pLeft);
             const overlapY = Math.min(pBottom - tTop, tBottom - pTop);
 
-            // Side Scrape Condition (X overlap is smaller than Y overlap)
+            // Side Scrape Condition
             if (overlapX < overlapY && overlapX < 14) {
-                // Bounce Player Away
                 if (player.x < t.x) {
                     player.x -= overlapX;
                     player.vx = -3;
@@ -758,11 +806,10 @@ function update() {
                     addSparks(tRight, player.y);
                 }
 
-                gameSpeed = Math.max(BASE_SPEED, gameSpeed - 1.5); // Minor speed bump
+                gameSpeed = Math.max(BASE_SPEED, gameSpeed - 1.5);
                 shakeIntensity = 5;
                 sound.playScrape();
             } else {
-                // Front / Back Direct Collision -> Wreck
                 triggerCrash();
             }
         }
@@ -838,11 +885,11 @@ function draw() {
     });
 
     traffic.forEach(t => {
-        drawCar(t.x, t.y, t.width, t.height, t.color, 0, false);
+        drawCar(t.x, t.y, t.width, t.height, t.color, 0, false, t.blinkerDir);
     });
 
     if (gameState === STATE_PLAYING || (gameState === STATE_GAMEOVER && shakeIntensity > 5)) {
-        drawCar(player.x, player.y, player.width, player.height, player.color, player.angle, true);
+        drawCar(player.x, player.y, player.width, player.height, player.color, player.angle, true, null);
     }
 
     particles.forEach(p => {
@@ -857,24 +904,28 @@ function draw() {
     ctx.restore();
 }
 
-function drawCar(x, y, width, height, color, angle = 0, isPlayer = false) {
+function drawCar(x, y, width, height, color, angle = 0, isPlayer = false, blinkerDir = null) {
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(angle);
 
+    // Car Shadow
     ctx.fillStyle = 'rgba(0,0,0,0.35)';
     ctx.fillRect(-width/2 + 3, -height/2 + 3, width, height);
 
+    // Body
     ctx.fillStyle = color;
     ctx.beginPath();
     ctx.roundRect(-width/2, -height/2, width, height, 6);
     ctx.fill();
 
+    // Roof & Glass
     ctx.fillStyle = '#0a0d14';
     ctx.beginPath();
     ctx.roundRect(-width/2 + 4, -height/2 + 14, width - 8, height - 28, 4);
     ctx.fill();
 
+    // Windshield Highlights
     ctx.fillStyle = 'rgba(255,255,255,0.2)';
     ctx.beginPath();
     ctx.moveTo(-width/2 + 6, -height/2 + 18);
@@ -883,7 +934,9 @@ function drawCar(x, y, width, height, color, angle = 0, isPlayer = false) {
     ctx.lineTo(-width/2 + 8, -height/2 + 28);
     ctx.fill();
 
+    // Lights & Blinkers
     if (isPlayer) {
+        // Player Lights
         ctx.fillStyle = '#00f0ff';
         ctx.shadowColor = '#00f0ff';
         ctx.shadowBlur = 10;
@@ -896,9 +949,25 @@ function drawCar(x, y, width, height, color, angle = 0, isPlayer = false) {
         ctx.fillRect(-width/2 + 4, height/2 - 3, 7, 3);
         ctx.fillRect(width/2 - 11, height/2 - 3, 7, 3);
     } else {
+        // NPC Taillights
         ctx.fillStyle = '#ff0055';
         ctx.fillRect(-width/2 + 4, -height/2, 6, 2);
         ctx.fillRect(width/2 - 10, -height/2, 6, 2);
+
+        // NPC Flashing Turn Signals (Blinkers)
+        if (blinkerDir && Math.floor(frameCount / 12) % 2 === 0) {
+            ctx.fillStyle = '#ffb700';
+            ctx.shadowColor = '#ffb700';
+            ctx.shadowBlur = 12;
+
+            if (blinkerDir === 'left') {
+                ctx.fillRect(-width/2 - 2, -height/2, 5, 4);
+                ctx.fillRect(-width/2 - 2, height/2 - 4, 5, 4);
+            } else if (blinkerDir === 'right') {
+                ctx.fillRect(width/2 - 3, -height/2, 5, 4);
+                ctx.fillRect(width/2 - 3, height/2 - 4, 5, 4);
+            }
+        }
     }
 
     ctx.restore();
@@ -914,5 +983,3 @@ loop();
 </script>
 </body>
 </html>
-
-```
